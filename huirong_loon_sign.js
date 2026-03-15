@@ -77,16 +77,18 @@ const ACTIONS = {
 };
 
 const ACTION_ORDER = ["sign", "lottery"];
-const DEFAULT_ACTION = "sign";
+const DEFAULT_ACTION = "all";
 const TIMEOUT_MS = 20000;
 const LOCK_KEY = "huirong.loon.runtime.lock";
 const LOCK_TTL_MS = 2 * 60 * 1000;
 const INTER_ACTION_DELAY_MS = 1500;
 const MAX_NOTIFICATION_DETAIL = 240;
+const SCRIPT_NAME = "汇融任务";
 const runtimeState = {
   runId: createRunId(),
   lockAcquired: false,
   completed: false,
+  lastMessage: "",
 };
 
 main();
@@ -95,6 +97,7 @@ function main() {
   const args = parseArgument(typeof $argument === "string" ? $argument : "");
   const detectedActionKey = detectActionFromRequest();
   const actionKey = args.action || detectedActionKey || DEFAULT_ACTION;
+  setRuntimeMessage(`启动执行: action=${actionKey}${typeof $request !== "undefined" ? " | mode=request" : " | mode=task"}`);
 
   if (typeof $request !== "undefined") {
     const action = ACTIONS[detectedActionKey || actionKey];
@@ -145,6 +148,7 @@ function captureRequest(action) {
   const method = (request.method || "GET").toUpperCase();
   const bodyText = normalizeBody(request.body);
   const bodyJson = safeJsonParse(bodyText);
+  log(`捕获请求: ${action.name} | ${method} | ${url}`);
 
   if (!action.urlPattern.test(url)) {
     finish(`当前请求不是${action.name}接口，已跳过`, true);
@@ -229,6 +233,7 @@ function runActionQueue(index, results) {
 
 function executeAction(action, callback) {
   const saved = readJSON(action.storeKey);
+  log(`准备执行: ${action.name}`);
   if (!saved) {
     callback({
       ok: false,
@@ -291,6 +296,7 @@ function executeAction(action, callback) {
     const responseText = extractResponseText(response, data);
     const status = getStatusCode(response);
     const json = safeJsonParse(responseText);
+    log(`接口返回: ${action.name} | HTTP ${status || 0}`);
     if (status !== 200) {
       callback({
         ok: false,
@@ -583,6 +589,8 @@ function formatAge(timestamp) {
 }
 
 function notify(title, subtitle, message) {
+  setRuntimeMessage([title, subtitle, message].filter(Boolean).join(" | "));
+  log(runtimeState.lastMessage);
   if (typeof $notification !== "undefined" && typeof $notification.post === "function") {
     $notification.post(title, subtitle || "", message || "");
   }
@@ -628,7 +636,13 @@ function done(value) {
       $done({});
       return;
     }
-    $done();
+    if (runtimeState.lastMessage) {
+      $done({
+        body: truncateText(runtimeState.lastMessage, 500),
+      });
+      return;
+    }
+    $done({});
   }
 }
 
@@ -708,6 +722,16 @@ function delay(ms, callback) {
 
 function createRunId() {
   return `run_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function setRuntimeMessage(message) {
+  runtimeState.lastMessage = truncateText(message || "", 500);
+}
+
+function log(message) {
+  if (typeof console !== "undefined" && typeof console.log === "function") {
+    console.log(`[${SCRIPT_NAME}] ${message}`);
+  }
 }
 
 function acquireLock(actionKey) {
