@@ -620,7 +620,15 @@ function done(value) {
   runtimeState.completed = true;
   releaseLock();
   if (typeof $done === "function") {
-    $done(value);
+    if (typeof value !== "undefined") {
+      $done(value);
+      return;
+    }
+    if (typeof $request !== "undefined" || typeof $response !== "undefined") {
+      $done({});
+      return;
+    }
+    $done();
   }
 }
 
