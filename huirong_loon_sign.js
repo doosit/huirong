@@ -1,19 +1,11 @@
 /*
  * Huirong check-in and lottery script for Loon.
  *
- * Recommended Loon config:
+ * Loon plugin URL:
+ * https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong.plugin
  *
- [MITM]
- hostname = bop.mobcb.com
- *
- [Script]
- http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/report\/member\/location\b script-path=/Users/satan/Documents/huirong/huirong_loon_sign.js,tag=汇融签到抓包,requires-body=true,timeout=30,argument=action=sign
- http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/prizesactivity\/code\/bigWheel\/play\b script-path=/Users/satan/Documents/huirong/huirong_loon_sign.js,tag=汇融抽奖抓包,requires-body=true,timeout=30,argument=action=lottery
- cron "0 8 * * *" script-path=/Users/satan/Documents/huirong/huirong_loon_sign.js,tag=汇融每日任务,timeout=120,argument=action=all
- *
- * Note:
- * - The config above is only kept here for reference.
- * - It must still be added to your Loon config or plugin file to take effect.
+ * Raw script URL:
+ * https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js
  *
  * Other examples:
  * cron "0 8 * * *" script-path=/path/to/huirong_loon_sign.js,tag=HuirongSignCron,timeout=60,argument="action=sign"
