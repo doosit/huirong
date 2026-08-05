@@ -1,12 +1,14 @@
 #!name= 汇融签到抽奖
-#!desc= 自动抓取并执行汇融小程序签到与抽奖任务
+#!desc= 持久化用户会话，动态兑换权鉴并执行签到与抽奖
 #!author= doosit
 #!homepage= https://github.com/doosit/huirong
+#!loon_version= 3.2.1(372)
 
 [MITM]
 hostname = bop.mobcb.com
 
 [Script]
-http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/report\/member\/location\b script-path=https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js,tag=汇融签到抓包,requires-body=true,timeout=30,argument=action=sign
-http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/prizesactivity\/code\/bigWheel\/play\b script-path=https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js,tag=汇融抽奖抓包,requires-body=true,timeout=30,argument=action=lottery
+http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/miniapp\/material\/info\/user(?:\?|$) script-path=https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js,tag=汇融账号会话抓取,timeout=30,argument=capture=auth
+http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/(?:report\/member\/location|member\/[^/]+\/signs)(?:\?|$) script-path=https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js,tag=汇融签到会话抓取,requires-body=true,timeout=30,argument=capture=auth
+http-request ^https:\/\/bop\.mobcb\.com\/api\/v3\/prizesactivity\/member\/remain\/count(?:\?|$) script-path=https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js,tag=汇融抽奖配置抓取,timeout=30,argument=capture=lottery
 cron "0 8 * * *" script-path=https://raw.githubusercontent.com/doosit/huirong/refs/heads/main/huirong_loon_sign.js,tag=汇融每日任务,timeout=120,argument=action=all
