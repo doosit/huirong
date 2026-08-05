@@ -25,7 +25,7 @@ const LEGACY_STORE_KEYS = [
   "huirong.loon.action.lottery",
 ];
 const SCRIPT_NAME = "汇融任务";
-const SCRIPT_VERSION = "20260805-3";
+const SCRIPT_VERSION = "20260805-4";
 const TIMEOUT_MS = 20000;
 const LOCK_TTL_MS = 2 * 60 * 1000;
 const INTER_ACTION_DELAY_MS = 1200;
@@ -1552,18 +1552,17 @@ function notifyAllResults(results, creditSummary) {
     (Number.isFinite(signPoints) ? signPoints : 0) +
     (Number.isFinite(lotteryPoints) ? lotteryPoints : 0);
   const lines = [
-    "╭──── 汇融每日任务 ────╮",
-    `│ 📅 日期：${summary.dateKey || formatDateKey(new Date())}`,
-    "├───────────────────┤",
-    `│ ${formatTaskIcon(signResult, "sign")} 签到状态：${formatTaskStatus(signResult, "sign")}`,
-    `│    今日签到积分：${formatPoints(signPoints)}`,
-    `│ ${formatTaskIcon(lotteryResult, "lottery")} 抽奖状态：${formatTaskStatus(lotteryResult, "lottery")}`,
-    `│    今日抽奖积分：${formatPoints(lotteryPoints)}`,
-    "├───────────────────┤",
-    `│ 📈 任务积分：${formatPoints(taskPoints)}`,
-    `│ 💰 当前总计：${isBlank(summary.totalCredit) ? "查询失败" : summary.totalCredit}`,
-    `│ 🧾 最近记录：${summary.latestBill || (summary.billsError ? "查询失败" : "暂无记录")}`,
-    "╰───────────────────╯",
+    `📅 日期：${summary.dateKey || formatDateKey(new Date())}`,
+    "",
+    `${formatTaskIcon(signResult, "sign")} 签到状态：${formatTaskStatus(signResult, "sign")}`,
+    `   今日签到积分：${formatPoints(signPoints)}`,
+    "",
+    `${formatTaskIcon(lotteryResult, "lottery")} 抽奖状态：${formatTaskStatus(lotteryResult, "lottery")}`,
+    `   今日抽奖积分：${formatPoints(lotteryPoints)}`,
+    "",
+    `📈 任务积分：${formatPoints(taskPoints)}`,
+    `💰 当前总计：${isBlank(summary.totalCredit) ? "查询失败" : summary.totalCredit}`,
+    `🧾 最近记录：${summary.latestBill || (summary.billsError ? "查询失败" : "暂无记录")}`,
   ];
   const report = lines.join("\n");
   setRuntimeMessage(report);

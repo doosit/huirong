@@ -344,7 +344,8 @@ function testDynamicExchangeAndTaskQueue() {
   assert.ok(result.notifications.some((item) => /当前总计：128/.test(item.message)));
   assert.ok(result.notifications.some((item) => /最近记录：\+2 参与【每日积分大转盘】获得积分/.test(item.message)));
   assert.strictEqual(result.logs.length, 1);
-  assert.ok(result.logs[0].includes("╭──── 汇融每日任务"));
+  assert.ok(result.logs[0].startsWith("[汇融任务] 📅 日期："));
+  assert.ok(!/[╭╮╰╯├─│]/.test(result.logs[0]));
   assert.ok(!result.logs[0].includes("临时设备权鉴"));
   assert.ok(result.requests.every((item) => item.request["auto-cookie"] === false));
 
@@ -451,7 +452,7 @@ function testEmptyRequestRunsCronPath() {
     argument: "action=sign&debug=true",
     request: {},
   });
-  assert.ok(debugResult.logs.some((line) => line.includes("版本: 20260805-3")));
+  assert.ok(debugResult.logs.some((line) => line.includes("版本: 20260805-4")));
 }
 
 function testNonJsonHttpErrorIncludesSafeMetadata() {
