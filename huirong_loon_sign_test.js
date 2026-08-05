@@ -5,7 +5,9 @@ const path = require("path");
 const vm = require("vm");
 
 const SCRIPT_PATH = path.join(__dirname, "huirong_loon_sign.js");
+const PLUGIN_PATH = path.join(__dirname, "huirong.plugin");
 const SCRIPT_SOURCE = fs.readFileSync(SCRIPT_PATH, "utf8");
+const PLUGIN_SOURCE = fs.readFileSync(PLUGIN_PATH, "utf8");
 const WAP_KEYS = Array.from({ length: 10 }, (_, index) => `PUBLIC_CONFIG_KEY_${index}`);
 const PUBLIC_CLIENT_SOURCE = [
   'function BaseConfig(){this.version="2.2.8";',
@@ -111,6 +113,30 @@ function expectedSignature(request) {
   };
 }
 
+function testPluginAutomaticCaptureRules() {
+  const rules = PLUGIN_SOURCE.split(/\r?\n/)
+    .filter((line) => line.startsWith("http-request "))
+    .map((line) => {
+      const separator = line.indexOf(" script-path=");
+      return {
+        line,
+        pattern: new RegExp(line.slice("http-request ".length, separator)),
+      };
+    });
+  const samples = [
+    ["/api/v3/miniapp/material/info/user?sid=test", false],
+    ["/api/v3/member/wechat/trade/points/commit/status?sid=test", true],
+    ["/api/v3/report/member/location?sid=test", true],
+    ["/api/v3/prizesactivity/member/remain/count?activityId=test", false],
+  ];
+
+  assert.strictEqual(rules.length, samples.length);
+  samples.forEach(([pathName, requiresBody], index) => {
+    assert.ok(rules[index].pattern.test(`https://bop.mobcb.com${pathName}`));
+    assert.strictEqual(/requires-body=true/.test(rules[index].line), requiresBody);
+  });
+}
+
 function testAuthCaptureDropsTemporaryFields() {
   const legacyPacket = JSON.stringify({ accessToken: "LEGACY_TEMP_TOKEN" });
   const result = runScript({
@@ -144,6 +170,42 @@ function testAuthCaptureDropsTemporaryFields() {
   assert.strictEqual(result.doneValues.length, 1);
 }
 
+function testAccountSwitchDoesNotReuseOldIdentityDetails() {
+  const previous = {
+    version: 2,
+    sid: "SID_OLD",
+    memberId: "MEMBER_OLD",
+    openId: "OPENID_OLD",
+    mallId: "MALL_OLD",
+    latitude: "30.100000",
+    longitude: "104.100000",
+    deviceId: "DEVICE_OLD",
+    clientType: "mini_weixin",
+    model: "IOS",
+  };
+  const result = runScript({
+    argument: "capture=auth",
+    store: {
+      "huirong.loon.auth.v2": JSON.stringify(previous),
+    },
+    request: {
+      method: "GET",
+      url: "https://bop.mobcb.com/api/v3/miniapp/material/info/user?sid=SID_NEW&appUid=MEMBER_NEW&mallId=MALL_NEW&deviceId=DEVICE_NEW",
+      headers: {},
+    },
+  });
+
+  const auth = JSON.parse(result.store.values.get("huirong.loon.auth.v2"));
+  assert.strictEqual(auth.sid, "SID_NEW");
+  assert.strictEqual(auth.memberId, "MEMBER_NEW");
+  assert.strictEqual(auth.mallId, "MALL_NEW");
+  assert.strictEqual(auth.deviceId, "DEVICE_NEW");
+  assert.strictEqual(auth.openId, "");
+  assert.strictEqual(auth.latitude, "");
+  assert.strictEqual(auth.longitude, "");
+  assert.ok(result.notifications.some((item) => item.subtitle === "检测到账号切换"));
+}
+
 function testLotteryCaptureDropsTemporaryFields() {
   const result = runScript({
     argument: "capture=lottery",
@@ -173,6 +235,7 @@ function testDynamicExchangeAndTaskQueue() {
     deviceId: "DEVICE_1",
     clientType: "mini_weixin",
     model: "IOS",
+    capturedAt: 1,
   };
   const lottery = {
     version: 2,
@@ -272,6 +335,70 @@ function testDynamicExchangeAndTaskQueue() {
   const persisted = Array.from(result.store.values.values()).join("\n");
   assert.ok(!persisted.includes("RUNTIME_ACCESS_TOKEN"));
   assert.ok(!persisted.includes("RUNTIME_WORK_KEY"));
+  assert.ok(result.store.values.has("huirong.loon.public-config.v1"));
+}
+
+function testPublicConfigCacheAvoidsShowcaseDownload() {
+  const cached = {
+    cacheVersion: 1,
+    appKey: "APPTEST",
+    version: "2.2.8",
+    wapKeys: WAP_KEYS,
+    sourceUrl: "https://bop.mobcb.com/uniappweb/js/showcase.test.js",
+    cachedAt: 1,
+  };
+  const result = runScript({
+    argument: "capture=unknown",
+    store: {
+      "huirong.loon.public-config.v1": JSON.stringify(cached),
+    },
+    request: { url: "https://bop.mobcb.com/ignored", method: "GET" },
+    httpHandler(method, request, callback) {
+      const url = new URL(request.url);
+      assert.strictEqual(method, "get");
+      assert.strictEqual(url.pathname, "/uniappweb/");
+      callback(null, { status: 200 }, '<script src="js/showcase.test.js"></script>');
+    },
+  });
+
+  let loaded;
+  result.context.loadPublicClientConfig((error, config) => {
+    assert.ifError(error);
+    loaded = config;
+  });
+  assert.strictEqual(loaded.appKey, "APPTEST");
+  assert.strictEqual(result.requests.length, 1);
+  assert.ok(result.logs.some((line) => line.includes("复用当前版本")));
+}
+
+function testMismatchedAccountsAreBlockedBeforeNetwork() {
+  const auth = {
+    sid: "SID_A",
+    memberId: "MEMBER_A",
+    openId: "OPENID_A",
+    mallId: "MALL_1",
+    latitude: "30",
+    longitude: "104",
+    deviceId: "DEVICE_1",
+  };
+  const lottery = {
+    activityId: "ACTIVITY_1",
+    memberId: "MEMBER_B",
+    mallId: "MALL_1",
+    code: "bigWheel",
+    deviceId: "DEVICE_1",
+  };
+  const result = runScript({
+    argument: "action=all",
+    store: {
+      "huirong.loon.auth.v2": JSON.stringify(auth),
+      "huirong.loon.lottery.v2": JSON.stringify(lottery),
+    },
+    request: {},
+  });
+
+  assert.strictEqual(result.requests.length, 0);
+  assert.ok(result.notifications.some((item) => item.subtitle === "账号配置不一致"));
 }
 
 function testEmptyRequestRunsCronPath() {
@@ -295,9 +422,13 @@ function testSha256KnownVector() {
   );
 }
 
+testPluginAutomaticCaptureRules();
 testAuthCaptureDropsTemporaryFields();
+testAccountSwitchDoesNotReuseOldIdentityDetails();
 testLotteryCaptureDropsTemporaryFields();
 testDynamicExchangeAndTaskQueue();
+testPublicConfigCacheAvoidsShowcaseDownload();
+testMismatchedAccountsAreBlockedBeforeNetwork();
 testEmptyRequestRunsCronPath();
 testSha256KnownVector();
 console.log("huirong_loon_sign_test: all tests passed");

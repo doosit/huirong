@@ -1,5 +1,5 @@
 #!name= 汇融签到抽奖
-#!desc= 持久化用户会话，动态兑换权鉴并执行签到与抽奖
+#!desc= 自动持久化 sid 用户会话，动态兑换权鉴并执行签到与抽奖
 #!author= doosit
 #!homepage= https://github.com/doosit/huirong
 #!loon_version= 3.2.1(372)

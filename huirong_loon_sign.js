@@ -9,7 +9,7 @@
  * - accessToken、workKey、timestamp、rnd、sign
  * - 完整请求 URL、请求头或请求包
  *
- * 定时任务会读取公开 H5 配置，重新注册设备会话，并为每个请求生成当前签名。
+ * 定时任务会读取或复用公开 H5 配置，重新注册设备会话，并为每个请求生成当前签名。
  */
 
 const API_BASE = "https://bop.mobcb.com/api/v3/";
@@ -17,6 +17,7 @@ const WEB_INDEX_URL = "https://bop.mobcb.com/uniappweb/";
 const STORE_KEYS = {
   auth: "huirong.loon.auth.v2",
   lottery: "huirong.loon.lottery.v2",
+  publicConfig: "huirong.loon.public-config.v1",
   lock: "huirong.loon.runtime.lock.v2",
 };
 const LEGACY_STORE_KEYS = [
@@ -107,19 +108,18 @@ function detectCaptureType(url) {
 
 function captureAuth(url) {
   const query = getQueryObject(url);
-  const body = safeJsonParse(normalizeBody($request.body));
+  const body = safeJsonParse(normalizeBody($request.body)) || {};
   const previous = readJSON(STORE_KEYS.auth) || {};
-  const sid = query.sid || previous.sid || "";
-  const openId = (body && body.openId) || previous.openId || "";
-  const latitude = (body && (body.latitude || body.lat)) || previous.latitude || "";
-  const longitude = (body && (body.longitude || body.lon)) || previous.longitude || "";
-  const memberId =
-    query.appUid ||
-    query.memberId ||
-    (body && body.memberId) ||
-    previous.memberId ||
-    "";
-  const mallId = query.mallId || (body && body.mallId) || previous.mallId || "";
+  const incomingSid = query.sid || "";
+  const incomingMemberId = query.appUid || query.memberId || body.memberId || "";
+  const accountChanged = hasIdentityChanged(previous, incomingSid, incomingMemberId);
+  const retained = accountChanged ? {} : previous;
+  const sid = incomingSid || retained.sid || "";
+  const memberId = incomingMemberId || retained.memberId || "";
+  const openId = body.openId || retained.openId || "";
+  const latitude = body.latitude || body.lat || retained.latitude || "";
+  const longitude = body.longitude || body.lon || retained.longitude || "";
+  const mallId = query.mallId || body.mallId || retained.mallId || "";
 
   if (isBlank(sid) || isBlank(memberId) || isBlank(mallId)) {
     finish(
@@ -142,9 +142,9 @@ function captureAuth(url) {
     mallId: String(mallId),
     latitude: String(latitude),
     longitude: String(longitude),
-    deviceId: String(query.deviceId || previous.deviceId || ""),
-    clientType: String(query.clientType || previous.clientType || "mini_weixin"),
-    model: String(query.model || previous.model || "IOS"),
+    deviceId: String(query.deviceId || retained.deviceId || ""),
+    clientType: String(query.clientType || retained.clientType || "mini_weixin"),
+    model: String(query.model || retained.model || "IOS"),
     capturedAt: Date.now(),
   };
 
@@ -153,7 +153,13 @@ function captureAuth(url) {
     return;
   }
 
-  if (auth.openId && auth.latitude && auth.longitude) {
+  if (accountChanged) {
+    notify(
+      "汇融账号会话",
+      "检测到账号切换",
+      "已保存新的 sid，并清除旧账号的 openId/定位继承；请按顺序补全签到信息"
+    );
+  } else if (auth.openId && auth.latitude && auth.longitude) {
     notify(
       "汇融账号会话",
       "持久会话抓取成功",
@@ -240,6 +246,14 @@ function runTask(action) {
     finish("初始化未完成", false, `缺少${missing.join("、")}，请按插件提示打开小程序对应页面`);
     return;
   }
+  if (action === "all" && !hasSameBusinessIdentity(auth, lottery)) {
+    finish(
+      "账号配置不一致",
+      false,
+      "签到会话与抽奖配置不属于同一会员或商场，请重新打开大转盘页完成抓取"
+    );
+    return;
+  }
 
   loadPublicClientConfig(function(error, config) {
     if (error) {
@@ -247,8 +261,8 @@ function runTask(action) {
       return;
     }
 
-    const profile = lottery || auth;
-    const deviceId = (lottery && lottery.deviceId) || (auth && auth.deviceId) || "";
+    const profile = action === "lottery" ? lottery : auth;
+    const deviceId = profile && profile.deviceId;
     if (!deviceId) {
       finish("设备配置缺失", false, "请重新打开抽奖页或会员页完成抓取");
       return;
@@ -261,12 +275,12 @@ function runTask(action) {
       }
 
       log("临时设备权鉴兑换成功，仅在本次运行内存中使用");
-      runActionQueue(action, config, session, auth, lottery, profile);
+      runActionQueue(action, config, session, auth, lottery);
     });
   });
 }
 
-function runActionQueue(action, config, session, auth, lottery, profile) {
+function runActionQueue(action, config, session, auth, lottery) {
   const queue = action === "all" ? ["sign", "lottery"] : [action];
   const results = [];
 
@@ -286,7 +300,7 @@ function runActionQueue(action, config, session, auth, lottery, profile) {
     };
 
     if (key === "sign") {
-      executeSign(config, session, auth, profile, callback);
+      executeSign(config, session, auth, callback);
       return;
     }
     executeLottery(config, session, lottery, callback);
@@ -313,6 +327,13 @@ function loadPublicClientConfig(callback) {
     }
 
     const scriptUrl = resolveWebUrl(match[1]);
+    const cached = readJSON(STORE_KEYS.publicConfig);
+    if (isValidPublicClientConfig(cached) && cached.sourceUrl === scriptUrl) {
+      log("复用当前版本的公开 H5 签名配置");
+      callback(null, cached);
+      return;
+    }
+
     httpRequest("get", { url: scriptUrl }, function(scriptError, scriptResponse, scriptData) {
       if (scriptError) {
         callback(`公开客户端脚本请求失败: ${scriptError}`);
@@ -334,12 +355,16 @@ function loadPublicClientConfig(callback) {
         if (!Array.isArray(wapKeys) || wapKeys.length !== 10 || wapKeys.some(isBlank)) {
           throw new Error("公开客户端签名配置不完整");
         }
-        callback(null, {
+        const config = {
+          cacheVersion: 1,
           appKey: authMatch[2],
           version: versionMatch[1],
           wapKeys,
           sourceUrl: scriptUrl,
-        });
+          cachedAt: Date.now(),
+        };
+        writeJSON(STORE_KEYS.publicConfig, config);
+        callback(null, config);
       } catch (error) {
         callback(error.message || String(error));
       }
@@ -416,13 +441,12 @@ function exchangeDeviceSession(config, deviceId, callback) {
           callback("设备注册响应为加密格式，当前运行时无法安全解密");
           return;
         }
-        if (!registerJson.body.accessToken || !registerJson.body.workKey) {
-          callback("设备注册响应缺少 accessToken/workKey");
+        if (!registerJson.body.accessToken) {
+          callback("设备注册响应缺少 accessToken");
           return;
         }
         callback(null, {
           accessToken: String(registerJson.body.accessToken),
-          workKey: String(registerJson.body.workKey),
           deviceId: String(deviceId),
         });
       }
@@ -430,14 +454,14 @@ function exchangeDeviceSession(config, deviceId, callback) {
   });
 }
 
-function executeSign(config, session, auth, profile, callback) {
+function executeSign(config, session, auth, callback) {
   const bodyText = JSON.stringify({
     openId: auth.openId,
     latitude: auth.latitude,
     longitude: auth.longitude,
     mallId: auth.mallId,
   });
-  const params = buildCommonParams(config, session, profile, {
+  const params = buildCommonParams(config, session, auth, {
     mallId: auth.mallId,
     appUid: auth.memberId,
     sid: auth.sid,
@@ -741,7 +765,38 @@ function isValidAuth(auth) {
     auth.openId &&
     auth.mallId &&
     auth.latitude &&
-    auth.longitude
+    auth.longitude &&
+    auth.deviceId
+  );
+}
+
+function hasIdentityChanged(previous, sid, memberId) {
+  return Boolean(
+    previous &&
+    ((previous.sid && sid && String(previous.sid) !== String(sid)) ||
+      (previous.memberId && memberId && String(previous.memberId) !== String(memberId)))
+  );
+}
+
+function hasSameBusinessIdentity(auth, lottery) {
+  return Boolean(
+    auth &&
+    lottery &&
+    String(auth.memberId) === String(lottery.memberId) &&
+    String(auth.mallId) === String(lottery.mallId)
+  );
+}
+
+function isValidPublicClientConfig(config) {
+  return Boolean(
+    config &&
+    config.cacheVersion === 1 &&
+    config.appKey &&
+    config.version &&
+    config.sourceUrl &&
+    Array.isArray(config.wapKeys) &&
+    config.wapKeys.length === 10 &&
+    !config.wapKeys.some(isBlank)
   );
 }
 
