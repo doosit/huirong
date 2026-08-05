@@ -25,7 +25,7 @@ const LEGACY_STORE_KEYS = [
   "huirong.loon.action.lottery",
 ];
 const SCRIPT_NAME = "汇融任务";
-const SCRIPT_VERSION = "20260805-4";
+const SCRIPT_VERSION = "20260805-5";
 const TIMEOUT_MS = 20000;
 const LOCK_TTL_MS = 2 * 60 * 1000;
 const INTER_ACTION_DELAY_MS = 1200;
@@ -272,7 +272,10 @@ function runActionQueue(action, config, session, auth, lottery) {
     }
 
     const key = queue[index];
+    const actionName = key === "sign" ? "签到" : "抽奖";
+    printMessage(`开始${actionName}`);
     const callback = function(result) {
+      printMessage(`${actionName}结果：${formatTaskStatus(result, key)}`);
       results.push(result);
       delay(INTER_ACTION_DELAY_MS, function() {
         next(index + 1);
@@ -1552,6 +1555,7 @@ function notifyAllResults(results, creditSummary) {
     (Number.isFinite(signPoints) ? signPoints : 0) +
     (Number.isFinite(lotteryPoints) ? lotteryPoints : 0);
   const lines = [
+    "任务汇总",
     `📅 日期：${summary.dateKey || formatDateKey(new Date())}`,
     "",
     `${formatTaskIcon(signResult, "sign")} 签到状态：${formatTaskStatus(signResult, "sign")}`,

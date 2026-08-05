@@ -343,10 +343,14 @@ function testDynamicExchangeAndTaskQueue() {
   assert.ok(result.notifications.some((item) => /任务积分：\+7/.test(item.message)));
   assert.ok(result.notifications.some((item) => /当前总计：128/.test(item.message)));
   assert.ok(result.notifications.some((item) => /最近记录：\+2 参与【每日积分大转盘】获得积分/.test(item.message)));
-  assert.strictEqual(result.logs.length, 1);
-  assert.ok(result.logs[0].startsWith("[汇融任务] 📅 日期："));
-  assert.ok(!/[╭╮╰╯├─│]/.test(result.logs[0]));
-  assert.ok(!result.logs[0].includes("临时设备权鉴"));
+  assert.strictEqual(result.logs.length, 5);
+  assert.ok(result.logs[0].includes("开始签到"));
+  assert.ok(result.logs[1].includes("签到结果：签到成功"));
+  assert.ok(result.logs[2].includes("开始抽奖"));
+  assert.ok(result.logs[3].includes("抽奖结果：恭喜您获得"));
+  assert.ok(result.logs[4].startsWith("[汇融任务] 任务汇总\n📅 日期："));
+  assert.ok(result.logs.every((line) => !/[╭╮╰╯├─│]/.test(line)));
+  assert.ok(result.logs.every((line) => !line.includes("临时设备权鉴")));
   assert.ok(result.requests.every((item) => item.request["auto-cookie"] === false));
 
   const signRequest = result.requests.find((item) => item.request.url.includes("/member/MEMBER_12345678/signs"));
@@ -452,7 +456,7 @@ function testEmptyRequestRunsCronPath() {
     argument: "action=sign&debug=true",
     request: {},
   });
-  assert.ok(debugResult.logs.some((line) => line.includes("版本: 20260805-4")));
+  assert.ok(debugResult.logs.some((line) => line.includes("版本: 20260805-5")));
 }
 
 function testNonJsonHttpErrorIncludesSafeMetadata() {
