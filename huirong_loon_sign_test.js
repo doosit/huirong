@@ -15,6 +15,12 @@ const PUBLIC_CLIENT_SOURCE = [
 ].join("");
 const { publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 1024 });
 const SERVER_PUBLIC_KEY = publicKey.export({ type: "spki", format: "pem" });
+const TEST_NOW = new Date();
+const TEST_DATE = [
+  TEST_NOW.getFullYear(),
+  String(TEST_NOW.getMonth() + 1).padStart(2, "0"),
+  String(TEST_NOW.getDate()).padStart(2, "0"),
+].join("-");
 
 function createStore(initial) {
   const values = new Map(Object.entries(initial || {}));
@@ -298,7 +304,10 @@ function testDynamicExchangeAndTaskQueue() {
       if (url.pathname === "/api/v3/member/MEMBER_12345678/mall/crm/credits/bills") {
         jsonResponse(callback, {
           errorCode: "PUB-00000",
-          body: [{ reason: "每日签到", time: "2026-08-05 08:00:00", type: 0, amount: 5 }],
+          body: [
+            { reason: "参与【每日积分大转盘】获得积分", time: `${TEST_DATE} 09:00:00`, type: 0, amount: 2 },
+            { reason: "每日签到", time: `${TEST_DATE} 08:00:00`, type: 0, amount: 5 },
+          ],
         });
         return;
       }
@@ -312,7 +321,11 @@ function testDynamicExchangeAndTaskQueue() {
       if (url.pathname === "/api/v3/prizesactivity/code/bigWheel/play") {
         jsonResponse(callback, {
           errorCode: "PUB-00000",
-          body: { description: "测试奖品" },
+          body: {
+            prizeType: "credit",
+            prizeName: "2积分",
+            description: "恭喜您获得“2积分”",
+          },
         });
         return;
       }
@@ -322,10 +335,17 @@ function testDynamicExchangeAndTaskQueue() {
 
   assert.ok(registerPayloadSeen);
   assert.strictEqual(result.doneValues.length, 1);
-  assert.ok(result.notifications.some((item) => item.subtitle === "成功 2 项 / 共 2 项"));
-  assert.ok(result.notifications.some((item) => /本次积分 \+5/.test(item.message)));
-  assert.ok(result.notifications.some((item) => /最近积分 \+5 每日签到/.test(item.message)));
-  assert.ok(result.notifications.some((item) => /当前总积分 128/.test(item.message)));
+  assert.ok(result.notifications.some((item) => item.subtitle === "签到：成功 · 抽奖：成功"));
+  assert.ok(result.notifications.some((item) => /签到状态：签到成功/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /今日签到积分：\+5/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /抽奖状态：恭喜您获得/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /今日抽奖积分：\+2/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /任务积分：\+7/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /当前总计：128/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /最近记录：\+2 参与【每日积分大转盘】获得积分/.test(item.message)));
+  assert.strictEqual(result.logs.length, 1);
+  assert.ok(result.logs[0].includes("╭──── 汇融每日任务"));
+  assert.ok(!result.logs[0].includes("临时设备权鉴"));
   assert.ok(result.requests.every((item) => item.request["auto-cookie"] === false));
 
   const signRequest = result.requests.find((item) => item.request.url.includes("/member/MEMBER_12345678/signs"));
@@ -337,7 +357,7 @@ function testDynamicExchangeAndTaskQueue() {
   assert.strictEqual(queryObject(signRequest.request.url).sid, "SID_PERSISTENT");
   assert.strictEqual(queryObject(billsRequest.request.url).activityCreditAccountUseType, "general");
   assert.strictEqual(queryObject(billsRequest.request.url).page, "0");
-  assert.strictEqual(queryObject(billsRequest.request.url).pagesize, "20");
+  assert.strictEqual(queryObject(billsRequest.request.url).pagesize, "50");
   assert.ok(billsRequest.request.url.includes("%20"));
   assert.ok(billsRequest.request.url.includes("%3A"));
 
@@ -364,7 +384,7 @@ function testPublicConfigCacheAvoidsShowcaseDownload() {
     cachedAt: 1,
   };
   const result = runScript({
-    argument: "capture=unknown",
+    argument: "capture=unknown&debug=true",
     store: {
       "huirong.loon.public-config.v1": JSON.stringify(cached),
     },
@@ -425,6 +445,13 @@ function testEmptyRequestRunsCronPath() {
   assert.strictEqual(result.requests.length, 0);
   assert.ok(result.notifications.some((item) => item.subtitle === "初始化未完成"));
   assert.strictEqual(result.doneValues.length, 1);
+  assert.ok(!result.logs.some((line) => line.includes("版本:")));
+
+  const debugResult = runScript({
+    argument: "action=sign&debug=true",
+    request: {},
+  });
+  assert.ok(debugResult.logs.some((line) => line.includes("版本: 20260805-3")));
 }
 
 function testNonJsonHttpErrorIncludesSafeMetadata() {

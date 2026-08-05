@@ -25,7 +25,7 @@ const LEGACY_STORE_KEYS = [
   "huirong.loon.action.lottery",
 ];
 const SCRIPT_NAME = "汇融任务";
-const SCRIPT_VERSION = "20260805-2";
+const SCRIPT_VERSION = "20260805-3";
 const TIMEOUT_MS = 20000;
 const LOCK_TTL_MS = 2 * 60 * 1000;
 const INTER_ACTION_DELAY_MS = 1200;
@@ -35,14 +35,16 @@ const runtimeState = {
   lockAcquired: false,
   completed: false,
   lastMessage: "",
+  debug: false,
 };
 
 main();
 
 function main() {
+  const args = parseArgument(typeof $argument === "string" ? $argument : "");
+  runtimeState.debug = isDebugEnabled(args.debug);
   clearLegacyTemporaryPackets();
   minimizeStoredAuth();
-  const args = parseArgument(typeof $argument === "string" ? $argument : "");
 
   if (hasHttpRequest()) {
     captureRequest(args.capture || "");
@@ -265,8 +267,7 @@ function runActionQueue(action, config, session, auth, lottery) {
 
   function next(index) {
     if (index >= queue.length) {
-      notifyAllResults(results);
-      done();
+      finalizeTaskResults(config, session, auth, results);
       return;
     }
 
@@ -286,6 +287,20 @@ function runActionQueue(action, config, session, auth, lottery) {
   }
 
   next(0);
+}
+
+function finalizeTaskResults(config, session, auth, results) {
+  if (!isValidAuth(auth)) {
+    notifyAllResults(results, {});
+    done();
+    return;
+  }
+  delay(500, function() {
+    queryCreditSummary(config, session, auth, function(summary) {
+      notifyAllResults(results, summary);
+      done();
+    });
+  });
 }
 
 function loadPublicClientConfig(callback) {
@@ -464,9 +479,11 @@ function executeSign(config, session, auth, callback) {
         const json = result.json;
         const body = json && json.body;
         if (body && typeof body.signInCreditValue !== "undefined") {
+          result.pointsEarned = Number(body.signInCreditValue);
           details.push(`本次积分 +${body.signInCreditValue}`);
         }
         if (body && typeof body.continuousDays !== "undefined") {
+          result.continuousDays = Number(body.continuousDays);
           details.push(`连续签到 ${body.continuousDays} 天`);
         }
         result.title = "汇融签到";
@@ -478,24 +495,9 @@ function executeSign(config, session, auth, callback) {
         callback(result);
         return;
       }
-
-      delay(500, function() {
-        queryCreditSummary(config, session, auth, function(summary) {
-          if (summary.recent) {
-            details.push(`最近积分 ${summary.recent}`);
-          } else if (summary.recentError) {
-            details.push(`最近明细查询失败: ${truncateText(summary.recentError, 60)}`);
-          }
-          if (!isBlank(summary.totalCredit)) {
-            details.push(`当前总积分 ${summary.totalCredit}`);
-          } else if (summary.totalError) {
-            details.push(`总积分查询失败: ${truncateText(summary.totalError, 60)}`);
-          }
-          result.detail = details.join(" | ") || "签到成功";
-          delete result.json;
-          callback(result);
-        });
-      });
+      result.detail = details.join(" | ") || "签到成功";
+      delete result.json;
+      callback(result);
     }
   );
 }
@@ -508,11 +510,15 @@ function queryCreditSummary(config, session, auth, callback) {
     } else {
       summary.totalCredit = totalCredit;
     }
-    queryRecentCredit(config, session, auth, function(recentError, recent) {
-      if (recentError) {
-        summary.recentError = recentError;
+    queryCreditBills(config, session, auth, function(billsError, bills) {
+      if (billsError) {
+        summary.billsError = billsError;
       } else {
-        summary.recent = recent;
+        summary.bills = bills;
+        const daily = summarizeTodayCredits(bills);
+        Object.keys(daily).forEach(function(key) {
+          summary[key] = daily[key];
+        });
       }
       callback(summary);
     });
@@ -545,7 +551,7 @@ function queryCreditBalance(config, session, auth, callback) {
   });
 }
 
-function queryRecentCredit(config, session, auth, callback) {
+function queryCreditBills(config, session, auth, callback) {
   const range = getCurrentMonthRange();
   const params = buildCommonParams(config, session, auth, {
     mallId: auth.mallId,
@@ -557,7 +563,7 @@ function queryRecentCredit(config, session, auth, callback) {
   params.starttime = range.start;
   params.endtime = range.end;
   params.page = 0;
-  params.pagesize = 20;
+  params.pagesize = 50;
   signRequestParams(params, "", config.wapKeys);
   const url = `${API_BASE}member/${encodeURIComponent(auth.memberId)}/mall/crm/credits/bills?${buildQueryString(params)}`;
 
@@ -569,11 +575,11 @@ function queryRecentCredit(config, session, auth, callback) {
       return;
     }
     const bills = result.json && result.json.body;
-    if (!Array.isArray(bills) || !bills.length) {
-      callback(null, "本月暂无记录");
+    if (!Array.isArray(bills)) {
+      callback("响应不是积分明细数组");
       return;
     }
-    callback(null, formatCreditBill(bills[0]));
+    callback(null, bills);
   });
 }
 
@@ -617,6 +623,8 @@ function executeLottery(config, session, lottery, callback) {
           title: "汇融抽奖",
           subtitle: "没有可用抽奖次数",
           detail: "本次未发起抽奖请求",
+          pointsEarned: 0,
+          drawPerformed: false,
         });
         return;
       }
@@ -655,6 +663,8 @@ function playLottery(config, session, lottery, remaining, callback) {
       if (result.ok) {
         const body = result.json && result.json.body;
         result.subtitle = "执行成功";
+        result.pointsEarned = extractCreditPrize(body);
+        result.drawPerformed = true;
         result.detail =
           (body && (body.description || body.prizeName || body.showName)) ||
           "抽奖完成";
@@ -1108,6 +1118,71 @@ function formatCreditBill(bill) {
   return `${prefix}${amount} ${reason}${time ? ` (${time})` : ""}`;
 }
 
+function summarizeTodayCredits(bills) {
+  const dateKey = formatDateKey(new Date());
+  const summary = {
+    dateKey,
+    signPoints: 0,
+    lotteryPoints: 0,
+    todayEarned: 0,
+    hasSignCredit: false,
+    hasLotteryCredit: false,
+    latestBill: Array.isArray(bills) && bills.length ? formatCreditBill(bills[0]) : "",
+  };
+  (Array.isArray(bills) ? bills : []).forEach(function(bill) {
+    const item = bill && typeof bill === "object" ? bill : {};
+    const time = String(item.time || "");
+    const amount = Math.abs(Number(item.amount));
+    if (time.indexOf(dateKey) !== 0 || !Number.isFinite(amount) || String(item.type) === "1") {
+      return;
+    }
+    const reason = String(item.reason || "");
+    summary.todayEarned += amount;
+    if (/签到/.test(reason)) {
+      summary.signPoints += amount;
+      summary.hasSignCredit = true;
+    }
+    if (/大转盘|转盘|抽奖/.test(reason)) {
+      summary.lotteryPoints += amount;
+      summary.hasLotteryCredit = true;
+    }
+  });
+  summary.signPoints = roundPoints(summary.signPoints);
+  summary.lotteryPoints = roundPoints(summary.lotteryPoints);
+  summary.todayEarned = roundPoints(summary.todayEarned);
+  return summary;
+}
+
+function extractCreditPrize(body) {
+  if (!body || String(body.prizeType || "").toLowerCase() !== "credit") {
+    return 0;
+  }
+  const text = [body.prizeName, body.showName, body.description].filter(Boolean).join(" ");
+  const match = text.match(/\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : 0;
+}
+
+function formatDateKey(date) {
+  const value = date || new Date();
+  return [
+    value.getFullYear(),
+    String(value.getMonth() + 1).padStart(2, "0"),
+    String(value.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function roundPoints(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function formatPoints(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "未查到";
+  }
+  return `${number >= 0 ? "+" : ""}${roundPoints(number)}`;
+}
+
 function generateMixed(length) {
   const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   let output = "";
@@ -1458,27 +1533,106 @@ function rotateRight(value, amount) {
 }
 
 function notify(title, subtitle, message) {
-  setRuntimeMessage([title, subtitle, message].filter(Boolean).join(" | "));
-  log(runtimeState.lastMessage);
+  setRuntimeMessage([title, subtitle, message].filter(Boolean).join("\n"));
+  printMessage(runtimeState.lastMessage);
   if (typeof $notification !== "undefined" && typeof $notification.post === "function") {
     $notification.post(title, subtitle || "", message || "");
   }
 }
 
-function notifyAllResults(results) {
-  const okCount = results.filter(function(item) {
-    return item && item.ok;
-  }).length;
-  const lines = results.map(function(item) {
-    if (!item) {
-      return "未知任务: 未执行";
+function notifyAllResults(results, creditSummary) {
+  const summary = creditSummary || {};
+  const signResult = findActionResult(results, "签到");
+  const lotteryResult = findActionResult(results, "抽奖");
+  const directSignPoints = getResultPoints(signResult);
+  const directLotteryPoints = getResultPoints(lotteryResult);
+  const signPoints = summary.hasSignCredit ? summary.signPoints : directSignPoints;
+  const lotteryPoints = summary.hasLotteryCredit ? summary.lotteryPoints : directLotteryPoints;
+  const taskPoints =
+    (Number.isFinite(signPoints) ? signPoints : 0) +
+    (Number.isFinite(lotteryPoints) ? lotteryPoints : 0);
+  const lines = [
+    "╭──── 汇融每日任务 ────╮",
+    `│ 📅 日期：${summary.dateKey || formatDateKey(new Date())}`,
+    "├───────────────────┤",
+    `│ ${formatTaskIcon(signResult, "sign")} 签到状态：${formatTaskStatus(signResult, "sign")}`,
+    `│    今日签到积分：${formatPoints(signPoints)}`,
+    `│ ${formatTaskIcon(lotteryResult, "lottery")} 抽奖状态：${formatTaskStatus(lotteryResult, "lottery")}`,
+    `│    今日抽奖积分：${formatPoints(lotteryPoints)}`,
+    "├───────────────────┤",
+    `│ 📈 任务积分：${formatPoints(taskPoints)}`,
+    `│ 💰 当前总计：${isBlank(summary.totalCredit) ? "查询失败" : summary.totalCredit}`,
+    `│ 🧾 最近记录：${summary.latestBill || (summary.billsError ? "查询失败" : "暂无记录")}`,
+    "╰───────────────────╯",
+  ];
+  const report = lines.join("\n");
+  setRuntimeMessage(report);
+  printMessage(report);
+  if (typeof $notification !== "undefined" && typeof $notification.post === "function") {
+    $notification.post("汇融每日任务", formatNotificationStatus(signResult, lotteryResult), report);
+  }
+}
+
+function findActionResult(results, actionName) {
+  const list = Array.isArray(results) ? results : [];
+  for (let index = 0; index < list.length; index += 1) {
+    if (list[index] && list[index].actionName === actionName) {
+      return list[index];
     }
-    const summary = item.ok
-      ? `${item.subtitle}${item.detail ? ` (${item.detail})` : ""}`
-      : `${item.subtitle}${item.detail ? ` (${item.detail})` : ""}`;
-    return `${item.actionName}: ${truncateText(summary, 100)}`;
-  });
-  notify("汇融任务", `成功 ${okCount} 项 / 共 ${results.length} 项`, truncateText(lines.join(" | ")));
+  }
+  return null;
+}
+
+function getResultPoints(result) {
+  if (!result || !Number.isFinite(Number(result.pointsEarned))) {
+    return NaN;
+  }
+  return Number(result.pointsEarned);
+}
+
+function formatTaskIcon(result, type) {
+  if (!result || !result.ok) {
+    return "❌";
+  }
+  if (type === "lottery" && result.drawPerformed === false) {
+    return "⏭";
+  }
+  return "✅";
+}
+
+function formatNotificationStatus(signResult, lotteryResult) {
+  const signStatus = !signResult
+    ? "未执行"
+    : !signResult.ok
+      ? "失败"
+      : signResult.subtitle === "今日已签到" ? "今日已签" : "成功";
+  const lotteryStatus = !lotteryResult
+    ? "未执行"
+    : !lotteryResult.ok
+      ? "失败"
+      : lotteryResult.drawPerformed === false ? "无次数" : "成功";
+  return `签到：${signStatus} · 抽奖：${lotteryStatus}`;
+}
+
+function formatTaskStatus(result, type) {
+  if (!result) {
+    return "未执行";
+  }
+  if (!result.ok) {
+    return truncateText(`失败 · ${result.subtitle || result.detail || "未知错误"}`, 42);
+  }
+  if (type === "sign") {
+    if (result.subtitle === "今日已签到") {
+      return "今日已签到";
+    }
+    return result.continuousDays
+      ? `签到成功 · 连续 ${result.continuousDays} 天`
+      : "签到成功";
+  }
+  if (result.subtitle === "没有可用抽奖次数") {
+    return "无可用次数";
+  }
+  return truncateText(result.detail || result.subtitle || "抽奖完成", 34);
 }
 
 function finish(message, silent, detail) {
@@ -1503,7 +1657,7 @@ function done(value) {
       $done({});
       return;
     }
-    $done(runtimeState.lastMessage ? { body: truncateText(runtimeState.lastMessage, 500) } : {});
+    $done(runtimeState.lastMessage ? { body: truncateText(runtimeState.lastMessage, 900) } : {});
   }
 }
 
@@ -1538,13 +1692,24 @@ function createRunId() {
 }
 
 function setRuntimeMessage(message) {
-  runtimeState.lastMessage = truncateText(message || "", 500);
+  runtimeState.lastMessage = truncateText(message || "", 900);
 }
 
 function log(message) {
+  if (!runtimeState.debug) {
+    return;
+  }
+  printMessage(message);
+}
+
+function printMessage(message) {
   if (typeof console !== "undefined" && typeof console.log === "function") {
     console.log(`[${SCRIPT_NAME}] ${message}`);
   }
+}
+
+function isDebugEnabled(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || ""));
 }
 
 function acquireLock(action) {

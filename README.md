@@ -36,6 +36,8 @@ argument=action=all
 
 也可在自定义任务中使用 `action=sign` 或 `action=lottery`。Loon 运行时需支持 `BigInt`，以便完成 RSA 设备注册。
 
+默认模式只输出一份多行任务日报。需要排查接口过程时，可临时使用 `action=all&debug=true` 开启详细日志；正常定时任务不要开启调试。
+
 ## 本地验证
 
 ```bash
