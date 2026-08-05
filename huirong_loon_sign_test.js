@@ -119,9 +119,15 @@ function testAuthCaptureDropsTemporaryFields() {
       "huirong.loon.action.sign": legacyPacket,
     },
     request: {
-      method: "GET",
-      url: "https://bop.mobcb.com/api/v3/miniapp/material/info/user?sid=SID_PERSISTENT&appUid=MEMBER_12345678&mallId=MALL_1&deviceId=DEVICE_1&clientType=mini_weixin&model=IOS&accessToken=TEMP_TOKEN&timestamp=123&rnd=TEMP_RND&sign=TEMP_SIGN",
+      method: "POST",
+      url: "https://bop.mobcb.com/api/v3/member/wechat/trade/points/commit/status?sid=SID_PERSISTENT&appUid=MEMBER_12345678&mallId=MALL_1&deviceId=DEVICE_1&clientType=mini_weixin&model=IOS&accessToken=TEMP_TOKEN&timestamp=123&rnd=TEMP_RND&sign=TEMP_SIGN",
       headers: { Cookie: "SHOULD_NOT_BE_STORED=1" },
+      body: JSON.stringify({
+        openId: "OPENID_123456789012345678901",
+        mallId: "MALL_1",
+        latitude: "30.000000",
+        longitude: "104.000000",
+      }),
     },
   });
 
@@ -129,6 +135,9 @@ function testAuthCaptureDropsTemporaryFields() {
   const auth = JSON.parse(stored);
   assert.strictEqual(auth.sid, "SID_PERSISTENT");
   assert.strictEqual(auth.memberId, "MEMBER_12345678");
+  assert.strictEqual(auth.openId, "OPENID_123456789012345678901");
+  assert.strictEqual(auth.latitude, "30.000000");
+  assert.strictEqual(auth.longitude, "104.000000");
   assert.strictEqual(auth.mallId, "MALL_1");
   assert.ok(!/TEMP_TOKEN|TEMP_SIGN|TEMP_RND|SHOULD_NOT_BE_STORED/.test(stored));
   assert.strictEqual(result.store.values.get("huirong.loon.action.sign"), "");
@@ -157,7 +166,10 @@ function testDynamicExchangeAndTaskQueue() {
     version: 2,
     sid: "SID_PERSISTENT",
     memberId: "MEMBER_12345678",
+    openId: "OPENID_123456789012345678901",
     mallId: "MALL_1",
+    latitude: "30.000000",
+    longitude: "104.000000",
     deviceId: "DEVICE_1",
     clientType: "mini_weixin",
     model: "IOS",
@@ -211,10 +223,15 @@ function testDynamicExchangeAndTaskQueue() {
         });
         return;
       }
-      if (/\/api\/v3\/member\/[^/]+\/signs$/.test(url.pathname)) {
+      if (url.pathname === "/api/v3/report/member/location") {
+        const payload = JSON.parse(request.body);
+        assert.strictEqual(payload.openId, "OPENID_123456789012345678901");
+        assert.strictEqual(payload.mallId, "MALL_1");
+        assert.strictEqual(payload.latitude, "30.000000");
+        assert.strictEqual(payload.longitude, "104.000000");
         jsonResponse(callback, {
           errorCode: "PUB-00000",
-          body: { signInCreditValue: 5, continuousDays: 3 },
+          body: { result: "success", success: "签到成功" },
         });
         return;
       }
@@ -241,7 +258,7 @@ function testDynamicExchangeAndTaskQueue() {
   assert.ok(result.notifications.some((item) => item.subtitle === "成功 2 项 / 共 2 项"));
   assert.ok(result.requests.every((item) => item.request["auto-cookie"] === false));
 
-  const signRequest = result.requests.find((item) => /\/member\/[^/]+\/signs/.test(item.request.url));
+  const signRequest = result.requests.find((item) => item.request.url.includes("/report/member/location"));
   const countRequest = result.requests.find((item) => item.request.url.includes("/prizesactivity/member/remain/count"));
   const playRequest = result.requests.find((item) => item.request.url.includes("/prizesactivity/code/bigWheel/play"));
   assert.ok(signRequest && countRequest && playRequest);

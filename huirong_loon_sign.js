@@ -91,8 +91,8 @@ function detectCaptureType(url) {
   const path = getUrlPath(url);
   if (
     /\/api\/v3\/miniapp\/material\/info\/user$/i.test(path) ||
-    /\/api\/v3\/report\/member\/location$/i.test(path) ||
-    /\/api\/v3\/member\/[^/]+\/signs$/i.test(path)
+    /\/api\/v3\/member\/wechat\/trade\/points\/commit\/status$/i.test(path) ||
+    /\/api\/v3\/report\/member\/location$/i.test(path)
   ) {
     return "auth";
   }
@@ -109,13 +109,14 @@ function captureAuth(url) {
   const query = getQueryObject(url);
   const body = safeJsonParse(normalizeBody($request.body));
   const previous = readJSON(STORE_KEYS.auth) || {};
-  const pathMemberId = extractMemberIdFromPath(getUrlPath(url));
   const sid = query.sid || previous.sid || "";
+  const openId = (body && body.openId) || previous.openId || "";
+  const latitude = (body && (body.latitude || body.lat)) || previous.latitude || "";
+  const longitude = (body && (body.longitude || body.lon)) || previous.longitude || "";
   const memberId =
     query.appUid ||
     query.memberId ||
-    pathMemberId ||
-    (body && (body.memberId || body.openId)) ||
+    (body && body.memberId) ||
     previous.memberId ||
     "";
   const mallId = query.mallId || (body && body.mallId) || previous.mallId || "";
@@ -137,7 +138,10 @@ function captureAuth(url) {
     version: 2,
     sid: String(sid),
     memberId: String(memberId),
+    openId: String(openId),
     mallId: String(mallId),
+    latitude: String(latitude),
+    longitude: String(longitude),
     deviceId: String(query.deviceId || previous.deviceId || ""),
     clientType: String(query.clientType || previous.clientType || "mini_weixin"),
     model: String(query.model || previous.model || "IOS"),
@@ -149,11 +153,25 @@ function captureAuth(url) {
     return;
   }
 
-  notify(
-    "汇融账号会话",
-    "持久会话抓取成功",
-    `会员: ${maskValue(auth.memberId, 4, 4)} | 仅保存 sid 与稳定配置，未保存临时 accessToken/sign`
-  );
+  if (auth.openId && auth.latitude && auth.longitude) {
+    notify(
+      "汇融账号会话",
+      "持久会话抓取成功",
+      `会员: ${maskValue(auth.memberId, 4, 4)} | 已保存 sid/openId/定位，未保存临时 accessToken/sign`
+    );
+  } else if (auth.openId) {
+    notify(
+      "汇融账号会话",
+      "账号身份已保存",
+      "请手动签到一次以保存定位坐标"
+    );
+  } else {
+    notify(
+      "汇融账号会话",
+      "基础会话已保存",
+      "等待会员页自动请求补全 openId"
+    );
+  }
   done({});
 }
 
@@ -413,17 +431,22 @@ function exchangeDeviceSession(config, deviceId, callback) {
 }
 
 function executeSign(config, session, auth, profile, callback) {
-  const bodyText = "{}";
+  const bodyText = JSON.stringify({
+    openId: auth.openId,
+    latitude: auth.latitude,
+    longitude: auth.longitude,
+    mallId: auth.mallId,
+  });
   const params = buildCommonParams(config, session, profile, {
     mallId: auth.mallId,
     appUid: auth.memberId,
     sid: auth.sid,
-    currentPageType: "/member/sign",
+    currentPageType: "/member/credit",
   });
   signRequestParams(params, bodyText, config.wapKeys);
-  const url = `${API_BASE}member/${encodeURIComponent(auth.memberId)}/signs?${buildQueryString(params)}`;
+  const url = `${API_BASE}report/member/location?${buildQueryString(params)}`;
 
-  log("准备执行: 签到 | path=/api/v3/member/{memberId}/signs");
+  log("准备执行: 签到 | path=/api/v3/report/member/location");
   httpRequest(
     "post",
     {
@@ -448,9 +471,12 @@ function executeSign(config, session, auth, profile, callback) {
         if (body && typeof body.continuousDays !== "undefined") {
           details.push(`连续 ${body.continuousDays} 天`);
         }
+        if (body && body.success) {
+          details.push(String(body.success));
+        }
         result.title = "汇融签到";
         result.subtitle = "执行成功";
-        result.detail = details.join(" | ") || "签到成功";
+        result.detail = details.join(" | ") || (body && body.result) || "签到成功";
       }
       result.actionName = "签到";
       delete result.json;
@@ -708,7 +734,15 @@ function isAlreadyCompleted(message) {
 }
 
 function isValidAuth(auth) {
-  return Boolean(auth && auth.sid && auth.memberId && auth.mallId);
+  return Boolean(
+    auth &&
+    auth.sid &&
+    auth.memberId &&
+    auth.openId &&
+    auth.mallId &&
+    auth.latitude &&
+    auth.longitude
+  );
 }
 
 function isValidLottery(lottery) {
@@ -767,11 +801,6 @@ function getQueryObject(url) {
 function getUrlPath(url) {
   const withoutQuery = String(url || "").split("?", 1)[0];
   return withoutQuery.replace(/^https?:\/\/[^/]+/i, "");
-}
-
-function extractMemberIdFromPath(path) {
-  const match = String(path || "").match(/\/api\/v3\/member\/([^/]+)\/signs$/i);
-  return match ? safeDecode(match[1]) : "";
 }
 
 function extractLotteryCode(path) {
