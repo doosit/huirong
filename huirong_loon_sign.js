@@ -2,7 +2,7 @@
  * 汇融汇 Loon 签到与抽奖脚本
  *
  * 持久化内容：
- * - sid、会员 ID、商场 ID 等用户会话与业务配置
+ * - sid、会员 ID、商场 ID、设备 ID 等用户会话与业务配置
  * - 抽奖活动 ID、设备 ID 等稳定参数
  *
  * 不持久化内容：
@@ -25,6 +25,7 @@ const LEGACY_STORE_KEYS = [
   "huirong.loon.action.lottery",
 ];
 const SCRIPT_NAME = "汇融任务";
+const SCRIPT_VERSION = "20260805-2";
 const TIMEOUT_MS = 20000;
 const LOCK_TTL_MS = 2 * 60 * 1000;
 const INTER_ACTION_DELAY_MS = 1200;
@@ -40,6 +41,7 @@ main();
 
 function main() {
   clearLegacyTemporaryPackets();
+  minimizeStoredAuth();
   const args = parseArgument(typeof $argument === "string" ? $argument : "");
 
   if (hasHttpRequest()) {
@@ -48,7 +50,7 @@ function main() {
   }
 
   const action = args.action || "all";
-  log(`运行模式: CRON/GENERIC | action=${action}`);
+  log(`版本: ${SCRIPT_VERSION} | 运行模式: CRON/GENERIC | action=${action}`);
   if (["all", "sign", "lottery"].indexOf(action) === -1) {
     finish(`不支持的 action: ${action}`);
     return;
@@ -90,11 +92,7 @@ function captureRequest(explicitType) {
 
 function detectCaptureType(url) {
   const path = getUrlPath(url);
-  if (
-    /\/api\/v3\/miniapp\/material\/info\/user$/i.test(path) ||
-    /\/api\/v3\/member\/wechat\/trade\/points\/commit\/status$/i.test(path) ||
-    /\/api\/v3\/report\/member\/location$/i.test(path)
-  ) {
+  if (/\/api\/v3\/miniapp\/material\/info\/user$/i.test(path)) {
     return "auth";
   }
   if (
@@ -108,18 +106,14 @@ function detectCaptureType(url) {
 
 function captureAuth(url) {
   const query = getQueryObject(url);
-  const body = safeJsonParse(normalizeBody($request.body)) || {};
   const previous = readJSON(STORE_KEYS.auth) || {};
   const incomingSid = query.sid || "";
-  const incomingMemberId = query.appUid || query.memberId || body.memberId || "";
+  const incomingMemberId = query.appUid || query.memberId || "";
   const accountChanged = hasIdentityChanged(previous, incomingSid, incomingMemberId);
   const retained = accountChanged ? {} : previous;
   const sid = incomingSid || retained.sid || "";
   const memberId = incomingMemberId || retained.memberId || "";
-  const openId = body.openId || retained.openId || "";
-  const latitude = body.latitude || body.lat || retained.latitude || "";
-  const longitude = body.longitude || body.lon || retained.longitude || "";
-  const mallId = query.mallId || body.mallId || retained.mallId || "";
+  const mallId = query.mallId || retained.mallId || "";
 
   if (isBlank(sid) || isBlank(memberId) || isBlank(mallId)) {
     finish(
@@ -135,13 +129,10 @@ function captureAuth(url) {
   }
 
   const auth = {
-    version: 2,
+    version: 3,
     sid: String(sid),
     memberId: String(memberId),
-    openId: String(openId),
     mallId: String(mallId),
-    latitude: String(latitude),
-    longitude: String(longitude),
     deviceId: String(query.deviceId || retained.deviceId || ""),
     clientType: String(query.clientType || retained.clientType || "mini_weixin"),
     model: String(query.model || retained.model || "IOS"),
@@ -157,25 +148,13 @@ function captureAuth(url) {
     notify(
       "汇融账号会话",
       "检测到账号切换",
-      "已保存新的 sid，并清除旧账号的 openId/定位继承；请按顺序补全签到信息"
-    );
-  } else if (auth.openId && auth.latitude && auth.longitude) {
-    notify(
-      "汇融账号会话",
-      "持久会话抓取成功",
-      `会员: ${maskValue(auth.memberId, 4, 4)} | 已保存 sid/openId/定位，未保存临时 accessToken/sign`
-    );
-  } else if (auth.openId) {
-    notify(
-      "汇融账号会话",
-      "账号身份已保存",
-      "请手动签到一次以保存定位坐标"
+      "已保存新账号的 sid、会员、商场和设备信息"
     );
   } else {
     notify(
       "汇融账号会话",
-      "基础会话已保存",
-      "等待会员页自动请求补全 openId"
+      "持久会话抓取成功",
+      `会员: ${maskValue(auth.memberId, 4, 4)} | 已保存 sid，未保存临时 accessToken/sign`
     );
   }
   done({});
@@ -455,22 +434,17 @@ function exchangeDeviceSession(config, deviceId, callback) {
 }
 
 function executeSign(config, session, auth, callback) {
-  const bodyText = JSON.stringify({
-    openId: auth.openId,
-    latitude: auth.latitude,
-    longitude: auth.longitude,
-    mallId: auth.mallId,
-  });
+  const bodyText = JSON.stringify({ mallId: auth.mallId });
   const params = buildCommonParams(config, session, auth, {
     mallId: auth.mallId,
     appUid: auth.memberId,
     sid: auth.sid,
-    currentPageType: "/member/credit",
+    currentPageType: "/member/signin",
   });
   signRequestParams(params, bodyText, config.wapKeys);
-  const url = `${API_BASE}report/member/location?${buildQueryString(params)}`;
+  const url = `${API_BASE}member/${encodeURIComponent(auth.memberId)}/signs?${buildQueryString(params)}`;
 
-  log("准备执行: 签到 | path=/api/v3/report/member/location");
+  log("准备执行: 签到 | path=/api/v3/member/{memberId}/signs");
   httpRequest(
     "post",
     {
@@ -480,33 +454,127 @@ function executeSign(config, session, auth, callback) {
     },
     function(error, response, data) {
       const result = parseBusinessResponse("签到", error, response, data);
-      if (!result.ok && isAlreadyCompleted(result.message)) {
+      const details = [];
+      if (!result.ok && isAlreadyCompleted(result.message, result.json && result.json.errorCode)) {
         result.ok = true;
         result.title = "汇融签到";
         result.subtitle = "今日已签到";
-        result.detail = result.message;
+        details.push("今日已签到");
       } else if (result.ok) {
         const json = result.json;
         const body = json && json.body;
-        const details = [];
         if (body && typeof body.signInCreditValue !== "undefined") {
-          details.push(`获得积分 ${body.signInCreditValue}`);
+          details.push(`本次积分 +${body.signInCreditValue}`);
         }
         if (body && typeof body.continuousDays !== "undefined") {
-          details.push(`连续 ${body.continuousDays} 天`);
-        }
-        if (body && body.success) {
-          details.push(String(body.success));
+          details.push(`连续签到 ${body.continuousDays} 天`);
         }
         result.title = "汇融签到";
         result.subtitle = "执行成功";
-        result.detail = details.join(" | ") || (body && body.result) || "签到成功";
       }
       result.actionName = "签到";
-      delete result.json;
-      callback(result);
+      if (!result.ok) {
+        delete result.json;
+        callback(result);
+        return;
+      }
+
+      delay(500, function() {
+        queryCreditSummary(config, session, auth, function(summary) {
+          if (summary.recent) {
+            details.push(`最近积分 ${summary.recent}`);
+          } else if (summary.recentError) {
+            details.push(`最近明细查询失败: ${truncateText(summary.recentError, 60)}`);
+          }
+          if (!isBlank(summary.totalCredit)) {
+            details.push(`当前总积分 ${summary.totalCredit}`);
+          } else if (summary.totalError) {
+            details.push(`总积分查询失败: ${truncateText(summary.totalError, 60)}`);
+          }
+          result.detail = details.join(" | ") || "签到成功";
+          delete result.json;
+          callback(result);
+        });
+      });
     }
   );
+}
+
+function queryCreditSummary(config, session, auth, callback) {
+  const summary = {};
+  queryCreditBalance(config, session, auth, function(balanceError, totalCredit) {
+    if (balanceError) {
+      summary.totalError = balanceError;
+    } else {
+      summary.totalCredit = totalCredit;
+    }
+    queryRecentCredit(config, session, auth, function(recentError, recent) {
+      if (recentError) {
+        summary.recentError = recentError;
+      } else {
+        summary.recent = recent;
+      }
+      callback(summary);
+    });
+  });
+}
+
+function queryCreditBalance(config, session, auth, callback) {
+  const params = buildCommonParams(config, session, auth, {
+    mallId: auth.mallId,
+    appUid: auth.memberId,
+    sid: auth.sid,
+    currentPageType: "userCredit",
+  });
+  signRequestParams(params, "", config.wapKeys);
+  const url = `${API_BASE}member/${encodeURIComponent(auth.memberId)}/mall/crm/balance?${buildQueryString(params)}`;
+
+  log("准备查询: 当前总积分");
+  httpRequest("get", { url, headers: buildBusinessHeaders(false) }, function(error, response, data) {
+    const result = parseBusinessResponse("总积分查询", error, response, data);
+    if (!result.ok) {
+      callback(result.detail || result.message || "查询失败");
+      return;
+    }
+    const accounts = result.json && result.json.body && result.json.body.accounts;
+    if (!accounts || isBlank(accounts.credit)) {
+      callback("响应缺少 accounts.credit");
+      return;
+    }
+    callback(null, String(accounts.credit));
+  });
+}
+
+function queryRecentCredit(config, session, auth, callback) {
+  const range = getCurrentMonthRange();
+  const params = buildCommonParams(config, session, auth, {
+    mallId: auth.mallId,
+    appUid: auth.memberId,
+    sid: auth.sid,
+    currentPageType: "userCredit",
+  });
+  params.activityCreditAccountUseType = "general";
+  params.starttime = range.start;
+  params.endtime = range.end;
+  params.page = 0;
+  params.pagesize = 20;
+  signRequestParams(params, "", config.wapKeys);
+  const url = `${API_BASE}member/${encodeURIComponent(auth.memberId)}/mall/crm/credits/bills?${buildQueryString(params)}`;
+
+  log("准备查询: 最近积分明细");
+  httpRequest("get", { url, headers: buildBusinessHeaders(false) }, function(error, response, data) {
+    const result = parseBusinessResponse("积分明细查询", error, response, data);
+    if (!result.ok) {
+      callback(result.detail || result.message || "查询失败");
+      return;
+    }
+    const bills = result.json && result.json.body;
+    if (!Array.isArray(bills) || !bills.length) {
+      callback(null, "本月暂无记录");
+      return;
+    }
+    callback(null, formatCreditBill(bills[0]));
+  });
 }
 
 function executeLottery(config, session, lottery, callback) {
@@ -666,16 +734,18 @@ function parseBusinessResponse(name, error, response, data) {
   }
 
   const status = getStatusCode(response);
-  const json = safeJsonParse(data);
+  const responseText = extractResponseText(response, data);
+  const json = safeJsonParse(responseText);
   const message = getApiMessage(json);
-  log(`接口返回: ${name} | HTTP ${status || 0} | code=${json && json.errorCode ? json.errorCode : "unknown"}`);
+  const code = json && (json.errorCode || json.status);
+  log(`接口返回: ${name} | HTTP ${status || 0} | code=${code || "unknown"}`);
 
   if (status !== 200) {
     return {
       ok: false,
       title: `汇融${name}`,
       subtitle: `${name}返回 HTTP ${status || "未知状态"}`,
-      detail: truncateText(message || "请稍后重试"),
+      detail: truncateText(message || buildResponseMetadata(response, responseText)),
       message,
       json,
     };
@@ -742,6 +812,8 @@ function getApiMessage(json) {
   return String(
     json.errorMessage ||
     json.errorCodeMsg ||
+    json.message ||
+    json.error ||
     (json.body && (json.body.message || json.body.msg || json.body.description)) ||
     ""
   );
@@ -753,8 +825,11 @@ function buildApiError(prefix, response, json) {
   return `${prefix}: HTTP ${status || 0}${json && json.errorCode ? ` | ${json.errorCode}` : ""}${message ? ` | ${message}` : ""}`;
 }
 
-function isAlreadyCompleted(message) {
-  return /已签到|重复签到|今日.*签/.test(String(message || ""));
+function isAlreadyCompleted(message, errorCode) {
+  return (
+    String(errorCode || "") === "MBR-00029" ||
+    /已签到|重复签到|今日.*签/.test(String(message || ""))
+  );
 }
 
 function isValidAuth(auth) {
@@ -762,10 +837,7 @@ function isValidAuth(auth) {
     auth &&
     auth.sid &&
     auth.memberId &&
-    auth.openId &&
     auth.mallId &&
-    auth.latitude &&
-    auth.longitude &&
     auth.deviceId
   );
 }
@@ -829,7 +901,7 @@ function buildQueryString(params) {
     })
     .map(function(key) {
       const value = String(params[key]);
-      const encodedValue = value.indexOf("#") >= 0 ? encodeURIComponent(value) : value;
+      const encodedValue = encodeURIComponent(value).replace(/%2F/gi, "/");
       return `${encodeURIComponent(key)}=${encodedValue}`;
     })
     .join("&");
@@ -944,6 +1016,31 @@ function clearLegacyTemporaryPackets() {
   });
 }
 
+function minimizeStoredAuth() {
+  const auth = readJSON(STORE_KEYS.auth);
+  if (!auth || typeof auth !== "object") {
+    return;
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(auth, "openId") &&
+    !Object.prototype.hasOwnProperty.call(auth, "latitude") &&
+    !Object.prototype.hasOwnProperty.call(auth, "longitude")
+  ) {
+    return;
+  }
+  writeJSON(STORE_KEYS.auth, {
+    version: 3,
+    sid: String(auth.sid || ""),
+    memberId: String(auth.memberId || ""),
+    mallId: String(auth.mallId || ""),
+    deviceId: String(auth.deviceId || ""),
+    clientType: String(auth.clientType || "mini_weixin"),
+    model: String(auth.model || "IOS"),
+    capturedAt: Number(auth.capturedAt) || Date.now(),
+  });
+  log("已移除旧版不再需要的 openId/定位存储");
+}
+
 function cloneObject(input) {
   const output = {};
   Object.keys(input || {}).forEach(function(key) {
@@ -957,6 +1054,58 @@ function getStatusCode(response) {
     return 0;
   }
   return Number(response.status || response.statusCode || 0);
+}
+
+function extractResponseText(response, data) {
+  if (typeof data === "string") {
+    return data;
+  }
+  if (response && typeof response.body === "string") {
+    return response.body;
+  }
+  if (data && typeof data === "object") {
+    try {
+      return JSON.stringify(data);
+    } catch (_) {
+      return "";
+    }
+  }
+  return "";
+}
+
+function buildResponseMetadata(response, responseText) {
+  const headers = (response && response.headers) || {};
+  let contentType = "unknown";
+  Object.keys(headers).some(function(key) {
+    if (String(key).toLowerCase() === "content-type") {
+      contentType = String(headers[key]).split(";", 1)[0] || "unknown";
+      return true;
+    }
+    return false;
+  });
+  return `服务端返回非 JSON | Content-Type ${contentType} | body ${String(responseText || "").length} 字节`;
+}
+
+function getCurrentMonthRange() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const lastDay = new Date(year, month, 0).getDate();
+  const monthText = String(month).padStart(2, "0");
+  return {
+    start: `${year}-${monthText}-01 00:00:00`,
+    end: `${year}-${monthText}-${String(lastDay).padStart(2, "0")} 23:59:59`,
+  };
+}
+
+function formatCreditBill(bill) {
+  const item = bill && typeof bill === "object" ? bill : {};
+  const number = Number(item.amount);
+  const amount = Number.isFinite(number) ? Math.abs(number) : String(item.amount || "未知");
+  const prefix = String(item.type) === "1" ? "-" : "+";
+  const reason = truncateText(String(item.reason || "积分变动").replace(/\s+/g, " "), 30);
+  const time = truncateText(String(item.time || "").replace(/\s+/g, " "), 24);
+  return `${prefix}${amount} ${reason}${time ? ` (${time})` : ""}`;
 }
 
 function generateMixed(length) {

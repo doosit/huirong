@@ -125,8 +125,6 @@ function testPluginAutomaticCaptureRules() {
     });
   const samples = [
     ["/api/v3/miniapp/material/info/user?sid=test", false],
-    ["/api/v3/member/wechat/trade/points/commit/status?sid=test", true],
-    ["/api/v3/report/member/location?sid=test", true],
     ["/api/v3/prizesactivity/member/remain/count?activityId=test", false],
   ];
 
@@ -145,15 +143,9 @@ function testAuthCaptureDropsTemporaryFields() {
       "huirong.loon.action.sign": legacyPacket,
     },
     request: {
-      method: "POST",
-      url: "https://bop.mobcb.com/api/v3/member/wechat/trade/points/commit/status?sid=SID_PERSISTENT&appUid=MEMBER_12345678&mallId=MALL_1&deviceId=DEVICE_1&clientType=mini_weixin&model=IOS&accessToken=TEMP_TOKEN&timestamp=123&rnd=TEMP_RND&sign=TEMP_SIGN",
+      method: "GET",
+      url: "https://bop.mobcb.com/api/v3/miniapp/material/info/user?sid=SID_PERSISTENT&appUid=MEMBER_12345678&mallId=MALL_1&deviceId=DEVICE_1&clientType=mini_weixin&model=IOS&accessToken=TEMP_TOKEN&timestamp=123&rnd=TEMP_RND&sign=TEMP_SIGN",
       headers: { Cookie: "SHOULD_NOT_BE_STORED=1" },
-      body: JSON.stringify({
-        openId: "OPENID_123456789012345678901",
-        mallId: "MALL_1",
-        latitude: "30.000000",
-        longitude: "104.000000",
-      }),
     },
   });
 
@@ -161,10 +153,11 @@ function testAuthCaptureDropsTemporaryFields() {
   const auth = JSON.parse(stored);
   assert.strictEqual(auth.sid, "SID_PERSISTENT");
   assert.strictEqual(auth.memberId, "MEMBER_12345678");
-  assert.strictEqual(auth.openId, "OPENID_123456789012345678901");
-  assert.strictEqual(auth.latitude, "30.000000");
-  assert.strictEqual(auth.longitude, "104.000000");
   assert.strictEqual(auth.mallId, "MALL_1");
+  assert.strictEqual(auth.version, 3);
+  assert.ok(!Object.prototype.hasOwnProperty.call(auth, "openId"));
+  assert.ok(!Object.prototype.hasOwnProperty.call(auth, "latitude"));
+  assert.ok(!Object.prototype.hasOwnProperty.call(auth, "longitude"));
   assert.ok(!/TEMP_TOKEN|TEMP_SIGN|TEMP_RND|SHOULD_NOT_BE_STORED/.test(stored));
   assert.strictEqual(result.store.values.get("huirong.loon.action.sign"), "");
   assert.strictEqual(result.doneValues.length, 1);
@@ -200,9 +193,9 @@ function testAccountSwitchDoesNotReuseOldIdentityDetails() {
   assert.strictEqual(auth.memberId, "MEMBER_NEW");
   assert.strictEqual(auth.mallId, "MALL_NEW");
   assert.strictEqual(auth.deviceId, "DEVICE_NEW");
-  assert.strictEqual(auth.openId, "");
-  assert.strictEqual(auth.latitude, "");
-  assert.strictEqual(auth.longitude, "");
+  assert.ok(!Object.prototype.hasOwnProperty.call(auth, "openId"));
+  assert.ok(!Object.prototype.hasOwnProperty.call(auth, "latitude"));
+  assert.ok(!Object.prototype.hasOwnProperty.call(auth, "longitude"));
   assert.ok(result.notifications.some((item) => item.subtitle === "检测到账号切换"));
 }
 
@@ -286,15 +279,26 @@ function testDynamicExchangeAndTaskQueue() {
         });
         return;
       }
-      if (url.pathname === "/api/v3/report/member/location") {
-        const payload = JSON.parse(request.body);
-        assert.strictEqual(payload.openId, "OPENID_123456789012345678901");
-        assert.strictEqual(payload.mallId, "MALL_1");
-        assert.strictEqual(payload.latitude, "30.000000");
-        assert.strictEqual(payload.longitude, "104.000000");
+      if (url.pathname === "/api/v3/member/MEMBER_12345678/signs") {
+        assert.strictEqual(method, "post");
+        assert.deepStrictEqual(JSON.parse(request.body), { mallId: "MALL_1" });
         jsonResponse(callback, {
           errorCode: "PUB-00000",
-          body: { result: "success", success: "签到成功" },
+          body: { signInCreditValue: 5, continuousDays: 3 },
+        });
+        return;
+      }
+      if (url.pathname === "/api/v3/member/MEMBER_12345678/mall/crm/balance") {
+        jsonResponse(callback, {
+          errorCode: "PUB-00000",
+          body: { accounts: { credit: 128 } },
+        });
+        return;
+      }
+      if (url.pathname === "/api/v3/member/MEMBER_12345678/mall/crm/credits/bills") {
+        jsonResponse(callback, {
+          errorCode: "PUB-00000",
+          body: [{ reason: "每日签到", time: "2026-08-05 08:00:00", type: 0, amount: 5 }],
         });
         return;
       }
@@ -319,15 +323,25 @@ function testDynamicExchangeAndTaskQueue() {
   assert.ok(registerPayloadSeen);
   assert.strictEqual(result.doneValues.length, 1);
   assert.ok(result.notifications.some((item) => item.subtitle === "成功 2 项 / 共 2 项"));
+  assert.ok(result.notifications.some((item) => /本次积分 \+5/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /最近积分 \+5 每日签到/.test(item.message)));
+  assert.ok(result.notifications.some((item) => /当前总积分 128/.test(item.message)));
   assert.ok(result.requests.every((item) => item.request["auto-cookie"] === false));
 
-  const signRequest = result.requests.find((item) => item.request.url.includes("/report/member/location"));
+  const signRequest = result.requests.find((item) => item.request.url.includes("/member/MEMBER_12345678/signs"));
+  const balanceRequest = result.requests.find((item) => item.request.url.includes("/mall/crm/balance"));
+  const billsRequest = result.requests.find((item) => item.request.url.includes("/mall/crm/credits/bills"));
   const countRequest = result.requests.find((item) => item.request.url.includes("/prizesactivity/member/remain/count"));
   const playRequest = result.requests.find((item) => item.request.url.includes("/prizesactivity/code/bigWheel/play"));
-  assert.ok(signRequest && countRequest && playRequest);
+  assert.ok(signRequest && balanceRequest && billsRequest && countRequest && playRequest);
   assert.strictEqual(queryObject(signRequest.request.url).sid, "SID_PERSISTENT");
+  assert.strictEqual(queryObject(billsRequest.request.url).activityCreditAccountUseType, "general");
+  assert.strictEqual(queryObject(billsRequest.request.url).page, "0");
+  assert.strictEqual(queryObject(billsRequest.request.url).pagesize, "20");
+  assert.ok(billsRequest.request.url.includes("%20"));
+  assert.ok(billsRequest.request.url.includes("%3A"));
 
-  [signRequest, countRequest, playRequest].forEach((item) => {
+  [signRequest, balanceRequest, billsRequest, countRequest, playRequest].forEach((item) => {
     const signature = expectedSignature(item.request);
     assert.strictEqual(signature.actual, signature.expected);
   });
@@ -335,6 +349,8 @@ function testDynamicExchangeAndTaskQueue() {
   const persisted = Array.from(result.store.values.values()).join("\n");
   assert.ok(!persisted.includes("RUNTIME_ACCESS_TOKEN"));
   assert.ok(!persisted.includes("RUNTIME_WORK_KEY"));
+  assert.ok(!persisted.includes("OPENID_123456789012345678901"));
+  assert.ok(!persisted.includes("30.000000"));
   assert.ok(result.store.values.has("huirong.loon.public-config.v1"));
 }
 
@@ -411,6 +427,27 @@ function testEmptyRequestRunsCronPath() {
   assert.strictEqual(result.doneValues.length, 1);
 }
 
+function testNonJsonHttpErrorIncludesSafeMetadata() {
+  const result = runScript({
+    argument: "capture=unknown",
+    request: { url: "https://bop.mobcb.com/ignored", method: "GET" },
+  });
+  const parsed = result.context.parseBusinessResponse(
+    "签到",
+    null,
+    {
+      status: 400,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+      body: "<html>Bad Request</html>",
+    },
+    undefined
+  );
+  assert.strictEqual(parsed.ok, false);
+  assert.ok(parsed.detail.includes("Content-Type text/html"));
+  assert.ok(parsed.detail.includes("24 字节"));
+  assert.ok(!parsed.detail.includes("Bad Request"));
+}
+
 function testSha256KnownVector() {
   const result = runScript({
     argument: "capture=unknown",
@@ -420,6 +457,7 @@ function testSha256KnownVector() {
     result.context.sha256("abc"),
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
   );
+  assert.strictEqual(result.context.isAlreadyCompleted("", "MBR-00029"), true);
 }
 
 testPluginAutomaticCaptureRules();
@@ -430,5 +468,6 @@ testDynamicExchangeAndTaskQueue();
 testPublicConfigCacheAvoidsShowcaseDownload();
 testMismatchedAccountsAreBlockedBeforeNetwork();
 testEmptyRequestRunsCronPath();
+testNonJsonHttpErrorIncludesSafeMetadata();
 testSha256KnownVector();
 console.log("huirong_loon_sign_test: all tests passed");
